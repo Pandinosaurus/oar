@@ -12,7 +12,7 @@ package OAR::IO;
 require Exporter;
 
 use DBI;
-use OAR::Conf qw(init_conf get_conf is_conf reset_conf);
+use OAR::Conf qw(init_conf get_conf get_conf_with_default_param is_conf reset_conf);
 use Data::Dumper;
 use Time::Local;
 use OAR::Modules::Judas qw(oar_debug oar_warn oar_error send_log_by_email set_current_log_category);
@@ -365,7 +365,7 @@ sub connect_one() {
     my $user = get_conf("DB_BASE_LOGIN");
     my $pwd = get_conf("DB_BASE_PASSWD");
     $Db_type = get_conf("DB_TYPE");
-    
+
     my $log_level = get_conf("LOG_LEVEL");
 
     $Remote_host = get_conf("SERVER_HOSTNAME");
@@ -2920,6 +2920,7 @@ sub frag_job($$) {
 
     my $job = get_job($dbh, $job_id);
 
+    my $result;
     if((defined($job)) && (($lusr eq $job->{job_user}) or ($lusr eq "oar") or ($lusr eq "root"))) {
         my $nbRes = $dbh->do("SELECT *
                               FROM frag_jobs
@@ -2932,16 +2933,36 @@ sub frag_job($$) {
                       VALUES ($job_id,\'$date\')
                      ");
             add_new_event($dbh,"FRAG_JOB_REQUEST",$job_id,"User $lusr requested to frag the job $job_id");
-            return(0);
+            $result = 0;
         }else{
             # Job already killed
-            return(-2);
+            $result = -2;
         }
     }else{
-        return(-1);
+        $result = -1;
     }
+    frag_inner_jobs($dbh, $job_id);
+    return $result;
 }
 
+#If KILL_INNER_JOBS_WITH_CONTAINER is set, frag the inner jobs if not already fragged
+sub frag_inner_jobs($$) {
+    my $dbh = shift;
+    my $container_job_id = shift;
+    my $regexp_op = "~";
+    if ($Db_type eq 'mysql') {
+        $regexp_op = "REGEXP";
+    }
+    if (lc(get_conf_with_default_param("KILL_INNER_JOBS_WITH_CONTAINER", "no")) eq "yes") {
+        my $date = get_date($dbh);
+        if ($dbh->do("SELECT job_id FROM job_types WHERE job_id = $container_job_id AND type = 'container'") > 0) {
+            $dbh->do("INSERT INTO frag_jobs (frag_id_job, frag_date) SELECT job_id,\'$date\' FROM job_types WHERE type $regexp_op \'^inner *= *$container_job_id\$\' AND NOT EXISTS (SELECT * FROM frag_jobs WHERE frag_id_job = job_id)
+                     ");
+            $dbh->do("INSERT INTO event_logs (type,job_id,date,description) SELECT \'FRAG_JOB_REQUEST\',t.job_id,\'$date\',\'Container job $container_job_id was fragged, frag inner job\' FROM job_types t WHERE t.type $regexp_op \'^inner *= *$container_job_id\$\' AND NOT EXISTS (SELECT * FROM event_logs e WHERE e.job_id = t.job_id AND e.type = \'FRAG_JOB_REQUEST\')
+                     ");
+        }
+    }
+}
 
 # ask_checkpoint_job
 # Verify if the user is able to checkpoint the job
